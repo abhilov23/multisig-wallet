@@ -35,7 +35,7 @@ pub mod multisig {
     }
 
     
-    pub fn create_transaction(ctx: Context<CreateTransaction>, nonce: u8)-> Result(()){
+    pub fn create_transaction(ctx: Context<CreateTransaction>, nonce: u8)-> Result<()>{
         let multisig = &mut ctx.accounts.multisig;
         let proposer = &ctx.accounts.proposer;
         let transaction = &mut ctx.accounts.transaction;
@@ -53,6 +53,11 @@ pub mod multisig {
          transaction.did_execute = false;  
          Ok(())
     }
+
+    pub fn approve_transaction() -> Result<()> {
+
+        Ok(())
+    }
    
 
 }
@@ -61,18 +66,17 @@ pub mod multisig {
 pub struct Initialize<'info> {
     #[account(init, 
     payer = user, 
-    space = 8 + 32 + 32 + 4 + 10 + 1,
+    space = <calculate>,
     seeds=[b"multisig", user.key().as_ref()],
     bump
     )]
-    pub multisig: Account<'info, Multisig>,
+    pub multisig: Account<'info, Multisig>,   ///@Change the Multisig PDA to something more stable than this.
     #[account(mut)]
     pub user: Signer<'info>,
     pub system_program: Program<'info, System>
 }
 
 #[derive(Accounts)]
-#[instruction(nonce: u8)]
 pub struct CreateTransaction<'info> {
     #[account(mut)]
     pub proposer: Signer<'info>,  //the person who creates the transaction
@@ -87,7 +91,7 @@ pub struct CreateTransaction<'info> {
         init,
         payer = proposer,
         space = <calculate>,
-        seeds = [b"transaction", multisig.key().as_ref(), &[nonce]],
+        seeds = [b"transaction", multisig.key().as_ref()],
         bump
     )]
     pub transaction: Account<'info, Transaction>, //accessing the transaction data-account
@@ -95,6 +99,24 @@ pub struct CreateTransaction<'info> {
     pub system_program: Program<'info, System>,   //for initializing the transaction data-account
 }
 
+
+#[derive(Accounts)]
+pub struct ApproveTransaction<'info>{
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+     #[account(
+        seeds = [b"multisig", owner.key().as_ref()],
+        bump,
+    )]
+    pub multisig: Account<'info, Multisig>,
+
+    #[account(
+        seeds = [b"transaction", multisig.key().as_ref()],
+        bump,
+    )]
+    pub transaction: Account<'info, Transaction>,
+}
 
 
 
