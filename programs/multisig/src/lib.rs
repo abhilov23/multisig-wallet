@@ -127,6 +127,16 @@ const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
             multisig.used_nonces.remove(0);
         }
         multisig.used_nonces.push(nonce);
+
+
+     // Emit event
+     emit!(TransactionCreated {
+      multisig: multisig.key(),
+      transaction: transaction.key(),
+      proposer: proposer.key(),
+      nonce,
+      program_id,
+     });
         
         Ok(())
     }
@@ -151,8 +161,16 @@ const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
 
         // Add approval
         transaction.approvals.push(owner);
+        
+        // Emit event
+    emit!(TransactionApproved {
+      transaction: transaction.key(),
+      approver: owner,
+      approvals_count: transaction.approvals.len() as u8,
+      threshold: multisig.threshold,
+     });
 
-        Ok(())
+    Ok(())
     }
 
     pub fn execute_transaction(ctx: Context<ExecuteTransaction>, multisig_id: u64, nonce: u64) -> Result<()> {
@@ -190,6 +208,12 @@ anchor_lang::solana_program::program::invoke_signed(
         &ctx.remaining_accounts,
        &[multisig_seeds]
       )?;
+
+      // Emit event
+    emit!(TransactionExecuted {
+      transaction: transaction.key(),
+      executor: ctx.accounts.executor.key(),
+    });
         
         Ok(())
     }
