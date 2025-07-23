@@ -1,33 +1,42 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::{
+    system_instruction,
+    program::invoke_signed,
+    sysvar::recent_blockhashes::RecentBlockhashes,
+};
+use anchor_lang::solana_program::nonce::state::Data as NonceAccount;
+
 
 declare_id!("9ci6bSKQcGTEFGiDTRHacAf84jKuzwE3X5vHBWTDu5nb");
 
 #[program]
 pub mod multisig {
     use super::*;
-    const MAX_OWNERS: usize = 10; //max user who can approve a transaction
+    const MAX_OWNERS: usize = 10;
+    const MAX_STORED_NONCES: usize = 100;
 
+    pub fn initialize(ctx: Context<Initialize>, multisig_id: u64, owners: Vec<Pubkey>, threshold: u8) -> Result<()> {
+        let multisig = &mut ctx.accounts.multisig;
+        let creator = &ctx.accounts.creator;
 
-    pub fn initialize(ctx: Context<Initialize>, owners: Vec<Pubkey>, threshold: u8) -> Result<()> {
-       let multisig = &mut ctx.accounts.multisig;
-       let creator = &ctx.accounts.creator;
+        multisig.owners = owners;
+        multisig.threshold = threshold;
+        multisig.creator = creator.key();
+        multisig.multisig_id = multisig_id;
+        multisig.transaction_nonce = 0;
+        multisig.used_nonces = Vec::new();
 
-       multisig.owners = owners;
-       multisig.threshold = threshold;
-       multisig.creator = creator.key(); //storing for future seed derivations
-
-    if threshold > multisig.owners.len() as u8 {
-           return Err(ErrorCode::InvalidThreshold.into());
-    }
+        if threshold > multisig.owners.len() as u8 {
+            return Err(ErrorCode::InvalidThreshold.into());
+        }
         
-    if owners.is_empty() {
-      return Err(ErrorCode::NoOwners.into());
-    }
+        if multisig.owners.is_empty() {
+            return Err(ErrorCode::NoOwners.into());
+        }
 
-
-       //preventing duplicate owners
-       let mut unique  = std::collections::HashSet::new();
-         for owner in &owners {
+        // Preventing duplicate owners
+        let mut unique = std::collections::HashSet::new();
+        for owner in &multisig.owners {
             if !unique.insert(owner) {
                 return Err(ErrorCode::DuplicateOwners.into());
             }
@@ -36,8 +45,7 @@ pub mod multisig {
         Ok(())
     }
 
-    
-    pub fn create_transaction(ctx: Context<CreateTransaction>, nonce: u8)-> Result<()>{
+    pub fn create_transaction(ctx: Context<CreateTransaction>, multisig_id: u64, nonce: u64) -> Result<()> {
         let multisig = &mut ctx.accounts.multisig;
         let proposer = &ctx.accounts.proposer;
         let transaction = &mut ctx.accounts.transaction;
@@ -45,131 +53,259 @@ pub mod multisig {
         require!(
             multisig.owners.contains(&proposer.key()),
             ErrorCode::NotAnOwner
-        ); 
+        );
 
-        // ✅ 2. Initialize transaction fields
-         transaction.multisig = multisig.key();
-         transaction.proposer = proposer.key();
-         transaction.signers = vec![false; multisig.owners.len()];
-         transaction.approvals = Vec![];
-         transaction.did_execute = false;  
+        require!(
+            !multisig.used_nonces.contains(&nonce),
+            ErrorCode::NonceAlreadyUsed
+        );
 
-         Ok(())
+        // Optional: Handle system nonce if needed
+        if ctx.accounts.nonce_account.is_some() {
+            let nonce_account = ctx.accounts.nonce_account.as_ref().unwrap();
+            let nonce_data = NonceAccount::from_account_info(nonce_account)?;
+            
+            require_keys_eq!(
+                nonce_data.authority,
+                multisig.key(),
+                ErrorCode::InvalidNonceAuthority
+            );
+
+            let ix = system_instruction::advance_nonce_account(
+                &nonce_account.key(),
+                &multisig.key(),
+            );
+            
+            let multisig_seeds = &[
+                b"multisig",
+                &multisig.multisig_id.to_le_bytes(),
+                &[ctx.bumps.multisig]
+            ];
+            
+            invoke_signed(
+                &ix,
+                &[
+                    nonce_account.to_account_info(),
+                    ctx.accounts.multisig.to_account_info(),
+                    ctx.accounts.recent_blockhashes.as_ref().unwrap().to_account_info(),
+                ],
+                &[multisig_seeds],
+            )?;
+        }
+
+        
+        transaction.multisig = multisig.key();
+        transaction.proposer = proposer.key();
+        transaction.signers = vec![false; multisig.owners.len()];
+        transaction.approvals = Vec::new();
+        transaction.did_execute = false;
+        transaction.nonce = nonce;
+
+        // Store used nonce with size limit
+        if multisig.used_nonces.len() >= MAX_STORED_NONCES {
+            multisig.used_nonces.remove(0);
+        }
+        multisig.used_nonces.push(nonce);
+        
+        Ok(())
     }
 
-    pub fn approve_transaction(ctx: Context<ApproveTransaction>) -> Result<()> {
+    pub fn approve_transaction(ctx: Context<ApproveTransaction>, multisig_id: u64, nonce: u64) -> Result<()> {
         let owner = ctx.accounts.owner.key();
         let multisig = &ctx.accounts.multisig;
         let transaction = &mut ctx.accounts.transaction;
 
         // Check if signer is an owner
-    if !multisig.owners.contains(&owner) {
-        return Err(ErrorCode::NotOwner.into());
-    }
+        if !multisig.owners.contains(&owner) {
+            return Err(ErrorCode::NotOwner.into());
+        }
 
-    // Check if already approved
-    if transaction.approvals.contains(&owner) {
-        return Err(ErrorCode::AlreadyApproved.into());
-    }
+        // Check if already approved
+        if transaction.approvals.contains(&owner) {
+            return Err(ErrorCode::AlreadyApproved.into());
+        }
 
- 
-    // Add approval
-    transaction.approvals.push(owner);
+        // Check if transaction is already executed
+        require!(!transaction.did_execute, ErrorCode::AlreadyExecuted);
+
+        // Add approval
+        transaction.approvals.push(owner);
 
         Ok(())
     }
-   
 
+    pub fn execute_transaction(ctx: Context<ExecuteTransaction>, multisig_id: u64, nonce: u64) -> Result<()> {
+        let multisig = &ctx.accounts.multisig;
+        let transaction = &mut ctx.accounts.transaction;
+
+        // Check if already executed
+        require!(!transaction.did_execute, ErrorCode::AlreadyExecuted);
+
+        // Check if enough approvals
+        require!(
+            transaction.approvals.len() >= multisig.threshold as usize,
+            ErrorCode::NotEnoughApprovals
+        );
+
+        // Mark as executed
+        transaction.did_execute = true;
+
+        // TODO: Add actual transaction execution logic here
+        // This is where you would implement the specific actions
+        // like transfers, program calls, etc.
+        
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
+#[instruction(multisig_id: u64)]
 pub struct Initialize<'info> {
-    #[account(init, 
-    payer = creator, 
-    space = 8 + 4 + (32 * MAX_OWNERS) + 1 + 32,
-    seeds=[b"multisig", creator.key().as_ref()],
-    bump
+    #[account(
+        init, 
+        payer = creator, 
+        space = 8 +                           // discriminator
+                4 + (32 * MAX_OWNERS) +       // owners vec
+                1 +                           // threshold
+                32 +                          // creator
+                8 +                           // multisig_id
+                8 +                           // transaction_nonce
+                4 + (8 * MAX_STORED_NONCES),  // used_nonces vec
+        seeds = [b"multisig", &multisig_id.to_le_bytes()],
+        bump
     )]
-    pub multisig: Account<'info, Multisig>,   ///@Change the Multisig PDA to something more stable than this.
+    pub multisig: Account<'info, Multisig>,
     #[account(mut)]
     pub creator: Signer<'info>,
     pub system_program: Program<'info, System>
 }
 
 #[derive(Accounts)]
+#[instruction(multisig_id: u64, nonce: u64)]
 pub struct CreateTransaction<'info> {
     #[account(mut)]
-    pub proposer: Signer<'info>,  //the person who creates the transaction
+    pub proposer: Signer<'info>,
 
     #[account(
-        seeds = [b"multisig", multisig.creator.as_ref()],
-        bump,
-    )]
-    pub multisig: Account<'info, Multisig>, //accessing the multisig data-account
-
-    #[account(
-        init,
-        payer = proposer,
-        space = 8 + 32 + 32 + 4 + MAX_OWNERS + 4 + (32 * MAX_OWNERS) + 1,
-        seeds = [b"transaction", multisig.key().as_ref()],                  
-        bump
-    )]
-    pub transaction: Account<'info, Transaction>, //accessing the transaction data-account
-
-    pub system_program: Program<'info, System>,   //for initializing the transaction data-account
-}
-
-
-#[derive(Accounts)]
-pub struct ApproveTransaction<'info>{
-    #[account(mut)]
-    pub owner: Signer<'info>,
-
-     #[account(
-        seeds = [b"multisig", multisig.creator.as_ref()],
+        mut,
+        seeds = [b"multisig", &multisig_id.to_le_bytes()],
         bump,
     )]
     pub multisig: Account<'info, Multisig>,
 
     #[account(
-        seeds = [b"transaction", multisig.key().as_ref()],
+        init,
+        payer = proposer,
+        space = 8 +                           // discriminator
+                32 +                          // multisig
+                32 +                          // proposer
+                4 + MAX_OWNERS +              // signers vec (bool = 1 byte each)
+                4 + (32 * MAX_OWNERS) +       // approvals vec
+                1 +                           // did_execute
+                8,                            // nonce
+        seeds = [b"transaction", multisig.key().as_ref(), &nonce.to_le_bytes()],
+        bump
+    )]
+    pub transaction: Account<'info, Transaction>,
+
+    /// CHECK: Optional system nonce account
+    pub nonce_account: Option<AccountInfo<'info>>,
+
+    /// CHECK: Sysvar required by nonce account (optional)
+    pub recent_blockhashes: Option<Sysvar<'info, RecentBlockhashes>>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(multisig_id: u64, nonce: u64)]
+pub struct ApproveTransaction<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(
+        seeds = [b"multisig", &multisig_id.to_le_bytes()],
+        bump,
+    )]
+    pub multisig: Account<'info, Multisig>,
+
+    #[account(
+        mut,
+        seeds = [b"transaction", multisig.key().as_ref(), &nonce.to_le_bytes()],
         bump,
     )]
     pub transaction: Account<'info, Transaction>,
 }
 
+#[derive(Accounts)]
+#[instruction(multisig_id: u64, nonce: u64)]
+pub struct ExecuteTransaction<'info> {
+    #[account(mut)]
+    pub executor: Signer<'info>,
 
+    #[account(
+        seeds = [b"multisig", &multisig_id.to_le_bytes()],
+        bump,
+    )]
+    pub multisig: Account<'info, Multisig>,
 
+    #[account(
+        mut,
+        seeds = [b"transaction", multisig.key().as_ref(), &nonce.to_le_bytes()],
+        bump,
+    )]
+    pub transaction: Account<'info, Transaction>,
+}
 
 #[account]
 pub struct Multisig {
     pub owners: Vec<Pubkey>,
-    pub threshold: u8, 
-    pub creator: Pubkey, // the creator of the multisig
+    pub threshold: u8,
+    pub creator: Pubkey,
+    pub multisig_id: u64,        // Added for stable seed derivation
+    pub transaction_nonce: u64,
+    pub used_nonces: Vec<u64>,
+}
+
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct TransactionAccount {
+    pub pubkey: Pubkey,
+    pub is_signer: bool,
+    pub is_writable: bool,
 }
 
 #[account]
-pub struct Transaction{
-    pub multisig: Pubkey, 
+pub struct Transaction {
+    pub multisig: Pubkey,
     pub proposer: Pubkey,
-    pub signers: Vec<bool>,
-    pub approvals: Vec<Pubkey>, // to keep track of who has approved the transaction
+    pub approvals: Vec<Pubkey>,
     pub did_execute: bool,
+    pub nonce: u64,
+    pub program_id: Pubkey,
+    pub accounts: Vec<TransactionAccount>,
 }
-
 
 #[error_code]
 pub enum ErrorCode {
     #[msg("Invalid threshold")]
     InvalidThreshold,
-    #[msg("duplicate owners")]
+    #[msg("Duplicate owners")]
     DuplicateOwners,
-    #[msg("no owner provided")]
+    #[msg("No owner provided")]
     NoOwners,
-    #[msg("the proposer is not an owner")]
+    #[msg("The proposer is not an owner")]
     NotAnOwner,
-    #[msg("not an owner")]
+    #[msg("Not an owner")]
     NotOwner,
-    #[msg("already approved")]
+    #[msg("Already approved")]
     AlreadyApproved,
+    #[msg("Proposer is not the nonce authority")]
+    InvalidNonceAuthority,
+    #[msg("This nonce has already been used")]
+    NonceAlreadyUsed,
+    #[msg("Transaction already executed")]
+    AlreadyExecuted,
+    #[msg("Not enough approvals to execute")]
+    NotEnoughApprovals,
 }
