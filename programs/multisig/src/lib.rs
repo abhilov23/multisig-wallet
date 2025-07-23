@@ -171,9 +171,25 @@ const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
         // Mark as executed
         transaction.did_execute = true;
 
-        // TODO: Add actual transaction execution logic here
-        // This is where you would implement the specific actions
-        // like transfers, program calls, etc.
+        // Build the instruction from stored data
+      let instruction = anchor_lang::solana_program::instruction::Instruction {
+      program_id: transaction.program_id,
+      accounts: transaction.accounts.iter().map(|acc| {
+          anchor_lang::solana_program::instruction::AccountMeta {
+            pubkey: acc.pubkey,
+            is_signer: acc.is_signer,
+            is_writable: acc.is_writable,
+         }
+       }).collect(),
+       data: transaction.data.clone(),
+    };
+
+// Execute the instruction using Cross Program Invocation (CPI)
+anchor_lang::solana_program::program::invoke_signed(
+       &instruction,
+        &ctx.remaining_accounts,
+       &[multisig_seeds]
+      )?;
         
         Ok(())
     }
@@ -278,6 +294,8 @@ pub struct ExecuteTransaction<'info> {
         bump,
     )]
     pub transaction: Account<'info, Transaction>,
+
+    pub remaining_accounts: Vec<AccountInfo<'info>>, // Accounts that will be passed to the transaction instruction
 }
 
 #[account]
@@ -308,6 +326,31 @@ pub struct Transaction {
     pub program_id: Pubkey,
     pub accounts: Vec<TransactionAccount>,
     pub data: Vec<u8>, //defines which type of transaction this is: (eg: sol transfer, token transfer, etc.)
+}
+
+// Add these BEFORE the #[error_code] section:
+
+#[event]
+pub struct TransactionCreated {
+    pub multisig: Pubkey,
+    pub transaction: Pubkey,
+    pub proposer: Pubkey,
+    pub nonce: u64,
+    pub program_id: Pubkey,
+}
+
+#[event]
+pub struct TransactionApproved {
+    pub transaction: Pubkey,
+    pub approver: Pubkey,
+    pub approvals_count: u8,
+    pub threshold: u8,
+}
+
+#[event]
+pub struct TransactionExecuted {
+    pub transaction: Pubkey,
+    pub executor: Pubkey,
 }
 
 #[error_code]
