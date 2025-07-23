@@ -14,6 +14,8 @@ pub mod multisig {
     use super::*;
     const MAX_OWNERS: usize = 10;
     const MAX_STORED_NONCES: usize = 100;
+    const MAX_INSTRUCTION_ACCOUNTS: usize = 10;      // Max 10 accounts per transaction
+const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
 
     pub fn initialize(ctx: Context<Initialize>, multisig_id: u64, owners: Vec<Pubkey>, threshold: u8) -> Result<()> {
         let multisig = &mut ctx.accounts.multisig;
@@ -45,7 +47,15 @@ pub mod multisig {
         Ok(())
     }
 
-    pub fn create_transaction(ctx: Context<CreateTransaction>, multisig_id: u64, nonce: u64) -> Result<()> {
+    pub fn create_transaction(
+      ctx: Context<CreateTransaction>,     // 1. Anchor context (automatic)
+      multisig_id: u64,                   // 2. Which multisig wallet
+      nonce: u64,                         // 3. Unique transaction ID
+      program_id: Pubkey,                 // 4. Which program to call
+      accounts: Vec<TransactionAccount>,   // 5. Which accounts are involved
+      data: Vec<u8>                       // 6. The instruction data
+    ) -> Result<()> {
+        
         let multisig = &mut ctx.accounts.multisig;
         let proposer = &ctx.accounts.proposer;
         let transaction = &mut ctx.accounts.transaction;
@@ -59,6 +69,17 @@ pub mod multisig {
             !multisig.used_nonces.contains(&nonce),
             ErrorCode::NonceAlreadyUsed
         );
+
+        // Validate instruction limits
+       require!(
+        accounts.len() <= MAX_INSTRUCTION_ACCOUNTS,
+        ErrorCode::TooManyAccounts
+       );
+
+       require!(
+        data.len() <= MAX_INSTRUCTION_DATA_SIZE,
+        ErrorCode::InstructionDataTooLarge
+       );
 
         // Optional: Handle system nonce if needed
         if ctx.accounts.nonce_account.is_some() {
@@ -197,12 +218,14 @@ pub struct CreateTransaction<'info> {
         init,
         payer = proposer,
         space = 8 +                           // discriminator
-                32 +                          // multisig
-                32 +                          // proposer
-                4 + MAX_OWNERS +              // signers vec (bool = 1 byte each)
-                4 + (32 * MAX_OWNERS) +       // approvals vec
-                1 +                           // did_execute
-                8,                            // nonce
+        32 +                          // multisig
+        32 +                          // proposer  
+        4 + (32 * MAX_OWNERS) +       // approvals vec
+        1 +                           // did_execute
+        8 +                           // nonce
+        32 +                          // program_id
+        4 + (65 * 10) +               // accounts vec (max 10 accounts, 65 bytes each)
+        4 + 1024,                     // data vec (max 1024 bytes)                            // nonce
         seeds = [b"transaction", multisig.key().as_ref(), &nonce.to_le_bytes()],
         bump
     )]
@@ -284,6 +307,7 @@ pub struct Transaction {
     pub nonce: u64,
     pub program_id: Pubkey,
     pub accounts: Vec<TransactionAccount>,
+    pub data: Vec<u8>, //defines which type of transaction this is: (eg: sol transfer, token transfer, etc.)
 }
 
 #[error_code]
@@ -308,4 +332,8 @@ pub enum ErrorCode {
     AlreadyExecuted,
     #[msg("Not enough approvals to execute")]
     NotEnoughApprovals,
+    #[msg("Too many accounts in transaction")]
+    TooManyAccounts,
+    #[msg("Instruction data too large")]
+    InstructionDataTooLarge,
 }
