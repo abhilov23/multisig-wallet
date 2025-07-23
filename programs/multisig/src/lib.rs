@@ -25,7 +25,6 @@ const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
         multisig.threshold = threshold;
         multisig.creator = creator.key();
         multisig.multisig_id = multisig_id;
-        multisig.transaction_nonce = 0;
         multisig.used_nonces = Vec::new();
 
         if threshold > multisig.owners.len() as u8 {
@@ -117,10 +116,13 @@ const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
         
         transaction.multisig = multisig.key();
         transaction.proposer = proposer.key();
-        transaction.signers = vec![false; multisig.owners.len()];
         transaction.approvals = Vec::new();
         transaction.did_execute = false;
         transaction.nonce = nonce;
+        
+        transaction.program_id = program_id;
+        transaction.accounts = accounts;
+        transaction.data = data;
 
         // Store used nonce with size limit
         if multisig.used_nonces.len() >= MAX_STORED_NONCES {
@@ -135,7 +137,6 @@ const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
       transaction: transaction.key(),
       proposer: proposer.key(),
       nonce,
-      program_id,
      });
         
         Ok(())
@@ -189,6 +190,13 @@ const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
         // Mark as executed
         transaction.did_execute = true;
 
+        let multisig_seeds = &[
+         b"multisig",
+         &multisig.multisig_id.to_le_bytes(),
+         &[ctx.bumps.multisig],
+        ];
+
+
         // Build the instruction from stored data
       let instruction = anchor_lang::solana_program::instruction::Instruction {
       program_id: transaction.program_id,
@@ -208,6 +216,10 @@ anchor_lang::solana_program::program::invoke_signed(
         &ctx.remaining_accounts,
        &[multisig_seeds]
       )?;
+
+        // Clear transaction data after execution to free up space
+      transaction.data.clear(); // Clear data after execution
+      transaction.accounts.clear(); // Clear accounts after execution
 
       // Emit event
     emit!(TransactionExecuted {
@@ -230,7 +242,6 @@ pub struct Initialize<'info> {
                 1 +                           // threshold
                 32 +                          // creator
                 8 +                           // multisig_id
-                8 +                           // transaction_nonce
                 4 + (8 * MAX_STORED_NONCES),  // used_nonces vec
         seeds = [b"multisig", &multisig_id.to_le_bytes()],
         bump
@@ -328,7 +339,6 @@ pub struct Multisig {
     pub threshold: u8,
     pub creator: Pubkey,
     pub multisig_id: u64,        // Added for stable seed derivation
-    pub transaction_nonce: u64,
     pub used_nonces: Vec<u64>,
 }
 
@@ -360,7 +370,6 @@ pub struct TransactionCreated {
     pub transaction: Pubkey,
     pub proposer: Pubkey,
     pub nonce: u64,
-    pub program_id: Pubkey,
 }
 
 #[event]
@@ -403,4 +412,8 @@ pub enum ErrorCode {
     TooManyAccounts,
     #[msg("Instruction data too large")]
     InstructionDataTooLarge,
+    #[msg("Already an owner")]
+    AlreadyAnOwner,
+    #[msg("Too many owners")]
+    TooManyOwners,
 }
