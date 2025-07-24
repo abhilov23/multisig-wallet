@@ -202,23 +202,13 @@ TransactionExecuted {
 | 6008 | TooManyAccounts | Too many accounts in transaction |
 | 6009 | InstructionDataTooLarge | Instruction data exceeds size limit |
 
-## 🧪 Testing
 
-```bash
-# Run all tests
-anchor test
-
-# Run specific test file
-anchor test --skip-local-validator tests/multisig.ts
-
-# Test with different clusters
-anchor test --provider.cluster devnet
-```
 
 ## 🚧 Future Enhancements
 
-- [ ] **Owner Management**: Add/remove owners, change threshold
-- [ ] **Transaction Management**: Cancel transactions, set expiration
+- [ ] **Owner Management**: Add_owner/remove_owners, change_threshold
+- [ ] **Transaction Management**: Cancel_transactions, set_expirations
+- [ ] **Managing Logging**: get transaction status, list pending transactions, get multisig info, list all owners
 - [ ] **Batch Operations**: Execute multiple transactions atomically  
 - [ ] **Recovery Mechanisms**: Emergency recovery procedures
 - [ ] **Oracle Integration**: External data source integration

@@ -425,14 +425,3 @@ pub enum ErrorCode {
     #[msg("Too many owners")]
     TooManyOwners,
 }
-
-
-// Further improvements:
-// 1. can add function for add_owner, remove_owner, change_threshold
-// 2. can add function for cancel_transaction, transaction_expiration, batch_transactions
-// 3. can add functions for get transaction status, list pending transactions, get multisig info, list all owners
-// 4. can add more events for better tracking
-// 5. can implement multi-step verification for sensitive operations
-// 6. can add recovery mechanisms
-// 7. can integrate with external oracles
-// 8. can support scheduled/recurring transactions
