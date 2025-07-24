@@ -760,6 +760,7 @@ name = "multisig"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
+ "bincode",
 ]
 
 [[package]]

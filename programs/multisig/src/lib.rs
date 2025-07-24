@@ -4,18 +4,18 @@ use anchor_lang::solana_program::{
     program::invoke_signed,
     sysvar::recent_blockhashes::RecentBlockhashes,
 };
-use anchor_lang::solana_program::nonce::state::Data as NonceAccount;
-
 
 declare_id!("9ci6bSKQcGTEFGiDTRHacAf84jKuzwE3X5vHBWTDu5nb");
+
+// Move constants outside the module to global scope
+const MAX_OWNERS: usize = 10;
+const MAX_STORED_NONCES: usize = 100;
+const MAX_INSTRUCTION_ACCOUNTS: usize = 10;
+const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;
 
 #[program]
 pub mod multisig {
     use super::*;
-    const MAX_OWNERS: usize = 10;
-    const MAX_STORED_NONCES: usize = 100;
-    const MAX_INSTRUCTION_ACCOUNTS: usize = 10;      // Max 10 accounts per transaction
-const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
 
     pub fn initialize(ctx: Context<Initialize>, multisig_id: u64, owners: Vec<Pubkey>, threshold: u8) -> Result<()> {
         let multisig = &mut ctx.accounts.multisig;
@@ -47,25 +47,24 @@ const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
     }
 
     pub fn create_transaction(
-      ctx: Context<CreateTransaction>,     // 1. Anchor context (automatic)
-      multisig_id: u64,                   // 2. Which multisig wallet
-      nonce: u64,                         // 3. Unique transaction ID
-      program_id: Pubkey,                 // 4. Which program to call
-      accounts: Vec<TransactionAccount>,   // 5. Which accounts are involved
-      data: Vec<u8>                       // 6. The instruction data
+      ctx: Context<CreateTransaction>,
+      _multisig_id: u64,
+      nonce: u64,
+      program_id: Pubkey,
+      accounts: Vec<TransactionAccount>,
+      data: Vec<u8>
     ) -> Result<()> {
         
-        let multisig = &mut ctx.accounts.multisig;
         let proposer = &ctx.accounts.proposer;
-        let transaction = &mut ctx.accounts.transaction;
 
+        // Read-only checks first (before mutable borrow)
         require!(
-            multisig.owners.contains(&proposer.key()),
+            ctx.accounts.multisig.owners.contains(&proposer.key()),
             ErrorCode::NotAnOwner
         );
 
         require!(
-            !multisig.used_nonces.contains(&nonce),
+            !ctx.accounts.multisig.used_nonces.contains(&nonce),
             ErrorCode::NonceAlreadyUsed
         );
 
@@ -81,24 +80,34 @@ const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
        );
 
         // Optional: Handle system nonce if needed
-        if ctx.accounts.nonce_account.is_some() {
-            let nonce_account = ctx.accounts.nonce_account.as_ref().unwrap();
-            let nonce_data = NonceAccount::from_account_info(nonce_account)?;
+        if let Some(nonce_account) = &ctx.accounts.nonce_account {
+            // Validate nonce authority if needed
+            let nonce_account_data = nonce_account.try_borrow_data()
+                .map_err(|_| ErrorCode::InvalidNonceAuthority)?;
             
-            require_keys_eq!(
-                nonce_data.authority,
-                multisig.key(),
-                ErrorCode::InvalidNonceAuthority
-            );
+            // Simple validation without full deserialization
+            // The nonce account authority is at offset 40 (after version, state, and reserved)
+            if nonce_account_data.len() >= 72 {
+                let authority_bytes = &nonce_account_data[40..72];
+                let authority = Pubkey::try_from(authority_bytes)
+                    .map_err(|_| ErrorCode::InvalidNonceAuthority)?;
+                
+                require_keys_eq!(
+                    authority,
+                    ctx.accounts.multisig.key(),
+                    ErrorCode::InvalidNonceAuthority
+                );
+            }
 
             let ix = system_instruction::advance_nonce_account(
                 &nonce_account.key(),
-                &multisig.key(),
+                &ctx.accounts.multisig.key(),
             );
             
-            let multisig_seeds = &[
+            // Fix: Create proper seeds array
+            let multisig_seeds: &[&[u8]] = &[
                 b"multisig",
-                &multisig.multisig_id.to_le_bytes(),
+                &ctx.accounts.multisig.multisig_id.to_le_bytes(),
                 &[ctx.bumps.multisig]
             ];
             
@@ -113,7 +122,10 @@ const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
             )?;
         }
 
-        
+        // Now get mutable references after all immutable operations are done
+        let multisig = &mut ctx.accounts.multisig;
+        let transaction = &mut ctx.accounts.transaction;
+
         transaction.multisig = multisig.key();
         transaction.proposer = proposer.key();
         transaction.approvals = Vec::new();
@@ -130,7 +142,6 @@ const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
         }
         multisig.used_nonces.push(nonce);
 
-
      // Emit event
      emit!(TransactionCreated {
       multisig: multisig.key(),
@@ -142,7 +153,7 @@ const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
         Ok(())
     }
 
-    pub fn approve_transaction(ctx: Context<ApproveTransaction>, multisig_id: u64, nonce: u64) -> Result<()> {
+    pub fn approve_transaction(ctx: Context<ApproveTransaction>, _multisig_id: u64, _nonce: u64) -> Result<()> {
         let owner = ctx.accounts.owner.key();
         let multisig = &ctx.accounts.multisig;
         let transaction = &mut ctx.accounts.transaction;
@@ -174,7 +185,7 @@ const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
     Ok(())
     }
 
-    pub fn execute_transaction(ctx: Context<ExecuteTransaction>, multisig_id: u64, nonce: u64) -> Result<()> {
+    pub fn execute_transaction(ctx: Context<ExecuteTransaction>, multisig_id: u64, _nonce: u64) -> Result<()> {
         let multisig = &ctx.accounts.multisig;
         let transaction = &mut ctx.accounts.transaction;
 
@@ -190,12 +201,12 @@ const MAX_INSTRUCTION_DATA_SIZE: usize = 1024;   // Max 1KB of instruction data
         // Mark as executed
         transaction.did_execute = true;
 
-        let multisig_seeds = &[
+        // Fix: Create proper seeds array
+        let multisig_seeds: &[&[u8]] = &[
          b"multisig",
-         &multisig.multisig_id.to_le_bytes(),
+         &multisig_id.to_le_bytes(),
          &[ctx.bumps.multisig],
         ];
-
 
         // Build the instruction from stored data
       let instruction = anchor_lang::solana_program::instruction::Instruction {
@@ -218,8 +229,8 @@ anchor_lang::solana_program::program::invoke_signed(
       )?;
 
         // Clear transaction data after execution to free up space
-      transaction.data.clear(); // Clear data after execution
-      transaction.accounts.clear(); // Clear accounts after execution
+      transaction.data.clear();
+      transaction.accounts.clear();
 
       // Emit event
     emit!(TransactionExecuted {
@@ -276,7 +287,7 @@ pub struct CreateTransaction<'info> {
         8 +                           // nonce
         32 +                          // program_id
         4 + (65 * 10) +               // accounts vec (max 10 accounts, 65 bytes each)
-        4 + 1024,                     // data vec (max 1024 bytes)                            // nonce
+        4 + 1024,                     // data vec (max 1024 bytes)
         seeds = [b"transaction", multisig.key().as_ref(), &nonce.to_le_bytes()],
         bump
     )]
@@ -311,6 +322,7 @@ pub struct ApproveTransaction<'info> {
     pub transaction: Account<'info, Transaction>,
 }
 
+// Fix: Remove the problematic remaining_accounts field from the struct
 #[derive(Accounts)]
 #[instruction(multisig_id: u64, nonce: u64)]
 pub struct ExecuteTransaction<'info> {
@@ -329,8 +341,7 @@ pub struct ExecuteTransaction<'info> {
         bump,
     )]
     pub transaction: Account<'info, Transaction>,
-
-    pub remaining_accounts: Vec<AccountInfo<'info>>, // Accounts that will be passed to the transaction instruction
+    // remaining_accounts are accessed via ctx.remaining_accounts in the function
 }
 
 #[account]
@@ -338,10 +349,9 @@ pub struct Multisig {
     pub owners: Vec<Pubkey>,
     pub threshold: u8,
     pub creator: Pubkey,
-    pub multisig_id: u64,        // Added for stable seed derivation
+    pub multisig_id: u64,
     pub used_nonces: Vec<u64>,
 }
-
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct TransactionAccount {
@@ -359,10 +369,8 @@ pub struct Transaction {
     pub nonce: u64,
     pub program_id: Pubkey,
     pub accounts: Vec<TransactionAccount>,
-    pub data: Vec<u8>, //defines which type of transaction this is: (eg: sol transfer, token transfer, etc.)
+    pub data: Vec<u8>,
 }
-
-// Add these BEFORE the #[error_code] section:
 
 #[event]
 pub struct TransactionCreated {
@@ -417,9 +425,6 @@ pub enum ErrorCode {
     #[msg("Too many owners")]
     TooManyOwners,
 }
-
-
-
 
 
 // Further improvements:
